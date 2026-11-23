@@ -29,7 +29,7 @@ zip -qr "$WORK/app.zip" . "${EXCLUDES[@]}"
 SIZE=$(wc -c < "$WORK/app.zip")
 MAX=$((50 * 1024 * 1024))
 [ "$SIZE" -le "$MAX" ] || fail "app.zip is $SIZE bytes; the limit is 50 MB (check your excludes)."
-B64=$(base64 -w0 "$WORK/app.zip")
+B64=$(base64 -i "$WORK/app.zip" | tr -d '\n')
 
 mcp() { # $1=tool name, $2=arguments JSON
   curl -sS -X POST "$MCP" \
@@ -89,10 +89,11 @@ if [ -n "$BUILD_ID" ]; then
   done
 fi
 
+OUT="${GITHUB_OUTPUT:-/dev/null}"
 {
   echo "deployment_id=$DEP_ID"
   echo "build_id=$BUILD_ID"
   echo "build_status=succeeded"
   echo "url=$URL"
-} >> "$GITHUB_OUTPUT"
+} >> "$OUT"
 echo "LazyHost: deployed ✓"
