@@ -29,46 +29,51 @@ zip -qr "$WORK/app.zip" . "${EXCLUDES[@]}"
 SIZE=$(wc -c < "$WORK/app.zip")
 MAX=$((50 * 1024 * 1024))
 [ "$SIZE" -le "$MAX" ] || fail "app.zip is $SIZE bytes; the limit is 50 MB (check your excludes)."
-B64=$(base64 -i "$WORK/app.zip" | tr -d '\n')
+# base64 em arquivo (linha-a-linha ok: o servidor ignora whitespace) —
+# o JSON da requisição é montado com --rawfile p/ não estourar ARG_MAX.
+base64 -i "$WORK/app.zip" > "$WORK/app.b64"
 
-mcp() { # $1=tool name, $2=arguments JSON
-  curl -sS -X POST "$MCP" \
-    -H "Authorization: Bearer ***" \
-    -H 'Content-Type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}"
-}
-
-# tool result: structuredContent = JSON summary; isError=true on tool failure
-extract() { echo "$1" | jq -r '.result.structuredContent // empty'; }
-check_err() {
-  if echo "$1" | jq -e '.result.isError == true' >/dev/null; then
-    MSG=$(echo "$1" | jq -r '.result.content[0].text // "deploy failed"')
-    fail "LazyHost: $MSG"
-  fi
-}
-
+# ── 2. Build the request JSON ────────────────────────────────────────────
 if [ -n "${INPUT_DEPLOYMENT_ID:-}" ]; then
-  ARGS=$(jq -n --arg id "$INPUT_DEPLOYMENT_ID" --arg b64 "$B64" \
+  jq -n --arg tool "upload_deployment_version" \
+    --arg id "$INPUT_DEPLOYMENT_ID" \
     --arg name "${GITHUB_SHA:-source.zip}" \
-    '{deployment_id:$id, source_zip_b64:$b64, source_filename:$name}')
-  RESP=$(mcp upload_deployment_version "$ARGS")
-  check_err "$RESP"
+    --rawfile b64 "$WORK/app.b64" \
+    '{jsonrpc:"2.0", id:1, method:"tools/call",
+      params:{name:$tool,
+        arguments:{deployment_id:$id, source_zip_b64:$b64, source_filename:$name}}}' \
+    > "$WORK/req.json"
 else
   [ -n "${INPUT_APP_SLUG:-}" ] || fail "app_slug is required for the first deploy (or pass deployment_id to update)"
-  ARGS=$(jq -n --arg app "$INPUT_APP_SLUG" --arg b64 "$B64" \
+  jq -n --arg tool "create_deployment" \
+    --arg app "$INPUT_APP_SLUG" \
     --arg name "${GITHUB_SHA:-source.zip}" \
     --argjson env "$ENV_JSON" --argjson sec "$SECRET_JSON" \
-    '{app_slug:$app, source_zip_b64:$b64, source_filename:$name, env:(if $env == {} then null else $env end), secret_env:(if $sec == {} then null else $sec end)}')
-  RESP=$(mcp create_deployment "$ARGS")
-  check_err "$RESP"
+    --rawfile b64 "$WORK/app.b64" \
+    '{jsonrpc:"2.0", id:1, method:"tools/call",
+      params:{name:$tool,
+        arguments:{app_slug:$app,
+          env:(if $env == {} then null else $env end),
+          secret_env:(if $sec == {} then null else $sec end),
+          source_zip_b64:$b64, source_filename:$name}}}' \
+    > "$WORK/req.json"
 fi
-RES=$(extract "$RESP")
-DEP_ID=$(echo "$RES" | jq -r '.deployment_id // .id // empty')
-BUILD_ID=$(echo "$RES" | jq -r '.build.id // .build_id // empty')
-URL=$(echo "$RES" | jq -r '.url // empty')
+
+# ── 3. Call the MCP endpoint ─────────────────────────────────────────────
+RESP=$(curl -sS -X POST "$MCP" \
+  -H "Authorization: Bearer ***" \
+  -H 'Content-Type: application/json' \
+  --data-binary "@$WORK/req.json")
+if echo "$RESP" | jq -e '.result.isError == true' >/dev/null; then
+  MSG=$(echo "$RESP" | jq -r '.result.content[0].text // "deploy failed"')
+  fail "LazyHost: $MSG"
+fi
+DEP_ID=$(echo "$RESP" | jq -r '.result.structuredContent.deployment_id // .result.structuredContent.id // empty')
+BUILD_ID=$(echo "$RESP" | jq -r '.result.structuredContent.build.id // empty')
+URL=$(echo "$RESP" | jq -r '.result.structuredContent.url // empty')
 echo "LazyHost: deployment=$DEP_ID build=$BUILD_ID url=$URL"
 
-# ── 2. Wait for the build ────────────────────────────────────────────────
+# ── 4. Wait for the build ────────────────────────────────────────────────
 if [ -n "$BUILD_ID" ]; then
   START=$(date +%s)
   while :; do
@@ -76,12 +81,12 @@ if [ -n "$BUILD_ID" ]; then
     [ "$ELAPSED" -ge "$WAIT_SECONDS" ] && fail "Timed out waiting for the build (${WAIT_SECONDS}s)."
     R=$(curl -sS -X POST "$MCP" -H "Authorization: Bearer ***" -H 'Content-Type: application/json' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_build\",\"arguments\":{\"build_id\":\"$BUILD_ID\",\"tail_lines\":30}}}")
-    S=$(extract "$R" | jq -r '.status // "pending"')
+    S=$(echo "$R" | jq -r '.result.structuredContent.status // "pending"')
     echo "build: $S (${ELAPSED}s)"
     case "$S" in
       succeeded) break ;;
       failed)
-        extract "$R" | jq -r '.log // empty' | tail -40
+        echo "$R" | jq -r '.result.structuredContent.log // empty' | tail -40
         fail "Build failed on LazyHost — see the log above."
         ;;
     esac
