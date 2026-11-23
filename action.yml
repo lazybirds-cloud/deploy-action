@@ -1,0 +1,83 @@
+name: LazyHost Deploy
+description: >-
+  Build a zip of your project and deploy it to LazyHost
+  (portal.lazybirds.cloud). Works for PocketBase and Next.js custom apps.
+author: lazybirds-cloud
+branding:
+  icon: rocket
+  color: purple
+
+inputs:
+  token:
+    description: LazyBirds PAT with the deployments.write capability (create it in Portal > Chaves de integração)
+    required: true
+  app_slug:
+    description: App slug for the FIRST deploy (e.g. pocketbase, nextjs). Required when deployment_id is not set.
+    required: false
+    default: ''
+  deployment_id:
+    description: Existing deployment UUID (from the deployment URL in the portal). Set for updates; leave empty for the first deploy.
+    required: false
+    default: ''
+  secret_env:
+    description: 'JSON object of secret variables, e.g. {"KEY":"value"}. Written to the release K8s Secret; values are never returned.'
+    required: false
+    default: ''
+  env:
+    description: 'JSON object of plain environment variables, e.g. {"KEY":"value"}.'
+    required: false
+    default: ''
+  source_dir:
+    description: Project directory to package.
+    required: false
+    default: '.'
+  excludes:
+    description: Extra zip excludes (space-separated, gitignore-style), e.g. 'uploads/* *.zip'.
+    required: false
+    default: ''
+  root_dir:
+    description: Subfolder of the project inside the zip (monorepos), e.g. apps/web.
+    required: false
+    default: ''
+  portal_url:
+    description: LazyBirds Portal URL.
+    required: false
+    default: https://portal.lazybirds.cloud
+  wait_minutes:
+    description: Max minutes to wait for the build (job fails if it fails or times out).
+    required: false
+    default: '15'
+
+outputs:
+  deployment_id:
+    description: Deployment UUID.
+    value: ${{ steps.deploy.outputs.deployment_id }}
+  build_id:
+    description: Build UUID.
+    value: ${{ steps.deploy.outputs.build_id }}
+  build_status:
+    description: succeeded | failed.
+    value: ${{ steps.deploy.outputs.build_status }}
+  url:
+    description: Public URL of the deployment.
+    value: ${{ steps.deploy.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - id: deploy
+      name: Deploy
+      shell: bash
+      env:
+        INPUT_TOKEN: ${{ inputs.token }}
+        INPUT_APP_SLUG: ${{ inputs.app_slug }}
+        INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+        INPUT_SECRET_ENV: ${{ inputs.secret_env }}
+        INPUT_ENV: ${{ inputs.env }}
+        INPUT_SOURCE_DIR: ${{ inputs.source_dir }}
+        INPUT_EXCLUDES: ${{ inputs.excludes }}
+        INPUT_ROOT_DIR: ${{ inputs.root_dir }}
+        INPUT_PORTAL_URL: ${{ inputs.portal_url }}
+        INPUT_WAIT_MINUTES: ${{ inputs.wait_minutes }}
+        GITHUB_SHA: ${{ github.sha }}
+      run: ${{ github.action_path }}/entrypoint.sh
