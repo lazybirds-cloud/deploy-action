@@ -63,7 +63,11 @@ fi
 RESP=$(curl -sS -X POST "$MCP" \
   -H "Authorization: Bearer ***" \
   -H 'Content-Type: application/json' \
-  --data-binary "@$WORK/req.json")
+  --data-binary "@$WORK/req.json" -o "$WORK/resp.txt" -w "%{http_code}")
+echo "MCP HTTP code: $RESP" || true
+echo "RESP bytes: $(wc -c < "$WORK/resp.txt")" || true
+head -c 200 "$WORK/resp.txt" | tr -d '\n' ; echo "" || true
+RESP=$(cat "$WORK/resp.txt")
 if echo "$RESP" | jq -e '.result.isError == true' >/dev/null; then
   MSG=$(echo "$RESP" | jq -r '.result.content[0].text // "deploy failed"')
   fail "LazyHost: $MSG"
