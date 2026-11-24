@@ -60,38 +60,69 @@ else
 fi
 
 # ── 3. Call the MCP endpoint ─────────────────────────────────────────────
-RESP=$(curl -sS -X POST "$MCP" \
-  -H "Authorization: Bearer ***" \
-  -H 'Content-Type: application/json' \
-  --data-binary "@$WORK/req.json" -o "$WORK/resp.txt" -w "%{http_code}")
-echo "MCP HTTP code: $RESP" || true
-echo "RESP bytes: $(wc -c < "$WORK/resp.txt")" || true
-head -c 200 "$WORK/resp.txt" | tr -d '\n' ; echo "" || true
+# The token goes in a header file (curl -H @file), so it never shows on the command line.
+[ -n "$TOKEN" ] || fail "token is empty (set the LAZYBIRDS_TOKEN secret)"
+echo "::add-mask::$TOKEN"
+printf 'Authorization: Bearer %s\n' "$TOKEN" > "$WORK/auth.h"
+chmod 600 "$WORK/auth.h"
+
+# mcp_call <request file> <response file> → prints the HTTP status code (000 = no answer)
+mcp_call() {
+  curl -sS -X POST "$MCP" \
+    -H @"$WORK/auth.h" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    --data-binary "@$1" -o "$2" -w '%{http_code}' || echo 000
+}
+
+HTTP=$(mcp_call "$WORK/req.json" "$WORK/resp.txt")
+case "$HTTP" in
+  200) ;;
+  401|403) fail "LazyHost: HTTP $HTTP — the token was refused (needs the deployments.write capability)." ;;
+  000) fail "LazyHost: no answer from $MCP." ;;
+  *) echo "Response: $(head -c 300 "$WORK/resp.txt")"; fail "LazyHost: HTTP $HTTP from $MCP." ;;
+esac
+jq -e . "$WORK/resp.txt" >/dev/null 2>&1 || { echo "Response: $(head -c 300 "$WORK/resp.txt")"; fail "LazyHost: the answer is not JSON."; }
 RESP=$(cat "$WORK/resp.txt")
+if echo "$RESP" | jq -e '.error' >/dev/null; then
+  fail "LazyHost: $(echo "$RESP" | jq -r '.error.message // "JSON-RPC error"')"
+fi
 if echo "$RESP" | jq -e '.result.isError == true' >/dev/null; then
   MSG=$(echo "$RESP" | jq -r '.result.content[0].text // "deploy failed"')
   fail "LazyHost: $MSG"
 fi
 DEP_ID=$(echo "$RESP" | jq -r '.result.structuredContent.deployment_id // .result.structuredContent.id // empty')
-BUILD_ID=$(echo "$RESP" | jq -r '.result.structuredContent.build.id // empty')
+BUILD_ID=$(echo "$RESP" | jq -r '.result.structuredContent.build.id // .result.structuredContent.build_id // empty')
 URL=$(echo "$RESP" | jq -r '.result.structuredContent.url // empty')
 echo "LazyHost: deployment=$DEP_ID build=$BUILD_ID url=$URL"
 
 # ── 4. Wait for the build ────────────────────────────────────────────────
+# A failed poll (network blip, 502) is retried; only 5 failures in a row stop the job.
 if [ -n "$BUILD_ID" ]; then
+  jq -n --arg id "$BUILD_ID" \
+    '{jsonrpc:"2.0", id:2, method:"tools/call", params:{name:"get_build", arguments:{build_id:$id, tail_lines:40}}}' \
+    > "$WORK/poll.json"
   START=$(date +%s)
+  MISSES=0
   while :; do
-    NOW=$(date +%s); ELAPSED=$((NOW - START))
+    ELAPSED=$(( $(date +%s) - START ))
     [ "$ELAPSED" -ge "$WAIT_SECONDS" ] && fail "Timed out waiting for the build (${WAIT_SECONDS}s)."
-    R=$(curl -sS -X POST "$MCP" -H "Authorization: Bearer ***" -H 'Content-Type: application/json' \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_build\",\"arguments\":{\"build_id\":\"$BUILD_ID\",\"tail_lines\":30}}}")
-    S=$(echo "$R" | jq -r '.result.structuredContent.status // "pending"')
+    HTTP=$(mcp_call "$WORK/poll.json" "$WORK/poll.txt")
+    if [ "$HTTP" != 200 ] || ! jq -e '.result.structuredContent' "$WORK/poll.txt" >/dev/null 2>&1; then
+      MISSES=$((MISSES + 1))
+      echo "build: status check failed (HTTP $HTTP, $MISSES/5)"
+      [ "$MISSES" -ge 5 ] && fail "LazyHost: could not read the build status (HTTP $HTTP)."
+      sleep 10
+      continue
+    fi
+    MISSES=0
+    S=$(jq -r '.result.structuredContent.status // "pending"' "$WORK/poll.txt")
     echo "build: $S (${ELAPSED}s)"
     case "$S" in
       succeeded) break ;;
-      failed)
-        echo "$R" | jq -r '.result.structuredContent.log // empty' | tail -40
-        fail "Build failed on LazyHost — see the log above."
+      failed|cancelled)
+        jq -r '.result.structuredContent.log // empty' "$WORK/poll.txt" | tail -40
+        fail "Build $S on LazyHost — see the log above."
         ;;
     esac
     sleep 10
