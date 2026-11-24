@@ -53,26 +53,33 @@ result in `result.structuredContent`; **tool failures return HTTP 200 with
 
 ## Recipe: deploy (create)
 
+Build the request in a **file**: a zip of more than ~100 KB doesn't fit in one
+command-line argument (`-d "$ZIP64"` fails with "Argument list too long").
+
 ```bash
-ZIP64=$(base64 -i app.zip | tr -d '\n')
-curl -s https://portal.lazybirds.cloud/mcp/ \
-  -H "Authorization: Bearer ***" -H "Content-Type: application/json" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",
-       \"params\":{\"name\":\"create_deployment\",\"arguments\":{
-         \"app_slug\":\"pocketbase\",
-         \"secret_env\":{\"PB_SUPERUSER_EMAIL\":\"you@x.io\",
-                        \"PB_SUPERUSER_PASSWORD\":\"min8chars\"},
-         \"source_zip_b64\":\"$ZIP64\"}}}" | jq
+base64 < app.zip > app.b64          # GNU and BSD; line breaks are fine
+jq -n --rawfile b64 app.b64 \
+  --arg email "$PB_SUPERUSER_EMAIL" --arg pass "$PB_SUPERUSER_PASSWORD" \
+  '{jsonrpc:"2.0", id:1, method:"tools/call", params:{name:"create_deployment",
+    arguments:{app_slug:"pocketbase",
+      secret_env:{PB_SUPERUSER_EMAIL:$email, PB_SUPERUSER_PASSWORD:$pass},
+      source_zip_b64:$b64}}}' > req.json
+printf 'Authorization: Bearer %s\n' "$LAZYHOST_TOKEN" > auth.h   # keeps the token off the command line
+curl -sS https://portal.lazybirds.cloud/mcp/ -H @auth.h \
+  -H "Content-Type: application/json" --data-binary @req.json | jq
+rm -f auth.h
 ```
 
 Read `result.structuredContent`: `.id` (deployment), `.build.id` (build),
 `.url` (public URL). Poll `get_build` every 10 s until the build reaches
 `succeeded` (the platform restarts the release with the new version).
+HTTP 401/403 = the token is missing, wrong or lacks `deployments.write`.
 
 ## Recipe: update (new version)
 
-Same call with `tools/call upload_deployment_version` and
-`{"deployment_id":"<uuid>","source_zip_b64":"$ZIP64"}`.
+Same request file with `name:"upload_deployment_version"` and
+`arguments:{deployment_id:"<uuid>", source_zip_b64:$b64}`. Env and secrets
+already set on the deployment are kept.
 
 ## Secrets and env
 
